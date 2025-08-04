@@ -1,0 +1,10 @@
+name: Intelligent-monitoring
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - torchvision
+  - matplotlib
+prefix: C:\Users\10745\anaconda3\envs\Intelligent-monitoring
