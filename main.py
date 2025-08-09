@@ -13,6 +13,8 @@ def main(video_path: str,
          output_dir: str = "results",
          train_data_path: str = "data/train_data.npy",
          train_labels_path: str = "data/train_labels.npy",
+         val_data_path: str = "data/val_data.npy",  # 新增：验证集特征路径
+         val_labels_path: str = "data/val_labels.npy",  # 新增：验证集标签路径
          threshold: float = 0.7,
          visualize: bool = True,
          detection_model: str = "yolov5s",
@@ -22,29 +24,20 @@ def main(video_path: str,
          batch_size: int = 1,
          save_interval: int = 10):
     """
-    主函数：将异常区域标记和性能统计模块串联起来
+    主函数：将异常区域标记和性能统计模块串联起来，新增验证集验证功能
 
     Args:
-        video_path: 输入视频路径
-        output_dir: 输出结果目录
-        train_data_path: 训练数据路径
-        train_labels_path: 训练标签路径
-        threshold: 异常检测阈值
-        visualize: 是否可视化结果
-        detection_model: 目标检测模型类型
-        feature_model: 特征提取模型类型
-        detect_classes: 需要检测的目标类别列表
-        use_gpu: 是否使用GPU加速
-        batch_size: 批处理大小（用于特征提取和预测）
-        save_interval: 保存异常帧的间隔（每隔多少帧保存一次）
+        val_data_path: 验证集特征数据路径
+        val_labels_path: 验证集标签路径
+        其他参数保持不变...
     """
-    # 创建输出目录
+    # 创建输出目录（保持不变）
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "frames"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "model"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "logs"), exist_ok=True)
 
-    # 配置日志
+    # 配置日志（保持不变）
     import logging
     logging.basicConfig(
         filename=os.path.join(output_dir, "logs", "process.log"),
@@ -54,7 +47,7 @@ def main(video_path: str,
     logger = logging.getLogger(__name__)
     logger.info(f"开始处理视频: {video_path}")
 
-    # 初始化模块
+    # 初始化模块（保持不变）
     try:
         marker = AnomalyRegionMarker(
             threshold=threshold,
@@ -69,7 +62,7 @@ def main(video_path: str,
         logger.error(f"初始化失败: {e}")
         return
 
-    # 加载训练数据
+    # 加载训练数据（保持不变）
     try:
         logger.info(f"加载训练数据: {train_data_path}")
         train_data = np.load(train_data_path)
@@ -84,14 +77,35 @@ def main(video_path: str,
         logger.error(f"加载训练数据失败: {e}")
         return
 
-    # 确保训练数据特征维度匹配
+    # 新增：加载验证集数据
+    try:
+        logger.info(f"加载验证集数据: {val_data_path}")
+        val_data = np.load(val_data_path)
+        val_labels = np.load(val_labels_path)
+        logger.info(f"验证集数据加载成功: 样本数={len(val_data)}, 特征维度={val_data.shape[1]}")
+    except FileNotFoundError:
+        print(f"警告: 找不到验证集数据或标签文件，将跳过验证步骤: {val_data_path}, {val_labels_path}")
+        logger.warning(f"找不到验证集数据或标签文件: {val_data_path}, {val_labels_path}")
+        val_data = None
+        val_labels = None
+    except Exception as e:
+        print(f"加载验证集数据失败，将跳过验证步骤: {e}")
+        logger.error(f"加载验证集数据失败: {e}")
+        val_data = None
+        val_labels = None
+
+    # 特征维度匹配检查（扩展验证集检查）
     expected_feature_dim = marker.feature_dim
     if train_data.shape[1] != expected_feature_dim:
         print(f"警告: 训练数据特征维度 ({train_data.shape[1]}) 与特征提取器维度 ({expected_feature_dim}) 不匹配")
-        print("这可能导致预测结果不准确")
         logger.warning(f"特征维度不匹配: 训练数据({train_data.shape[1]}) vs 提取器({expected_feature_dim})")
 
-    # 训练模型
+    # 新增：验证集特征维度检查
+    if val_data is not None and val_data.shape[1] != expected_feature_dim:
+        print(f"警告: 验证集数据特征维度 ({val_data.shape[1]}) 与特征提取器维度 ({expected_feature_dim}) 不匹配")
+        logger.warning(f"特征维度不匹配: 验证集({val_data.shape[1]}) vs 提取器({expected_feature_dim})")
+
+    # 训练模型（保持不变）
     try:
         logger.info("开始训练LSSVM模型...")
         trainer.train(train_data, train_labels)
@@ -104,14 +118,48 @@ def main(video_path: str,
         logger.error(f"模型训练失败: {e}")
         return
 
-    # 打开视频文件
+    # 新增：使用验证集评估模型
+    val_metrics = None
+    if val_data is not None and val_labels is not None:
+        try:
+            logger.info("开始使用验证集评估模型...")
+            print("\n开始验证集评估...")
+
+            # 预测验证集
+            val_predictions = trainer.predict(val_data)
+            val_predictions = [1 if p > 0 else 0 for p in val_predictions]
+
+            # 计算评估指标（假设PerformanceStats有计算指标的静态方法）
+            val_metrics = PerformanceStats.calculate_metrics(
+                val_labels,
+                val_predictions
+            )
+
+            # 输出验证结果
+            print("\n验证集评估结果:")
+            print(f"准确率 (Accuracy): {val_metrics['accuracy']:.4f}")
+            print(f"精确率 (Precision): {val_metrics['precision']:.4f}")
+            print(f"召回率 (Recall): {val_metrics['recall']:.4f}")
+            print(f"F1分数 (F1-score): {val_metrics['f1']:.4f}")
+
+            # 记录日志
+            logger.info(f"验证集评估结果: 准确率={val_metrics['accuracy']:.4f}, "
+                        f"精确率={val_metrics['precision']:.4f}, "
+                        f"召回率={val_metrics['recall']:.4f}, "
+                        f"F1分数={val_metrics['f1']:.4f}")
+
+        except Exception as e:
+            print(f"模型验证失败: {e}")
+            logger.error(f"模型验证失败: {e}")
+
+    # 打开视频文件及后续处理（保持不变）
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Error: 无法打开视频文件 {video_path}")
         logger.error(f"无法打开视频文件: {video_path}")
         return
 
-    # 获取视频信息
+    # 获取视频信息（保持不变）
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -120,13 +168,13 @@ def main(video_path: str,
     print(f"视频信息: {width}x{height}, {fps:.2f} FPS, 总帧数: {frame_count}")
     logger.info(f"视频信息: {width}x{height}, {fps:.2f} FPS, 总帧数: {frame_count}")
 
-    # 创建输出视频写入器
+    # 创建输出视频写入器（保持不变）
     if visualize:
         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         output_video_path = os.path.join(output_dir, "output.mp4")
         out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
 
-    # 逐帧处理视频
+    # 逐帧处理视频（保持不变）
     frame_idx = 0
     anomaly_frames = 0
     total_process_time = 0
@@ -232,24 +280,32 @@ def main(video_path: str,
                 print(f"\n当前帧已保存至: {save_path}")
                 logger.info(f"手动保存帧: {save_path}")
 
-    # 释放资源
+    # 释放资源（保持不变）
     cap.release()
     if visualize:
         out.release()
         cv2.destroyAllWindows()
 
-    # 生成性能报告
+    # 生成性能报告（扩展验证集结果）
     avg_fps = frame_idx / total_process_time if total_process_time > 0 else 0
     report = stats.generate_report()
     print(f"\n处理完成! 总耗时: {total_process_time:.2f}s, 平均FPS: {avg_fps:.2f}")
     print(f"共处理 {frame_idx} 帧，检测到 {anomaly_frames} 个异常帧")
     print(report)
 
-    # 保存性能报告
+    # 保存性能报告（扩展验证集结果）
     report_path = os.path.join(output_dir, "performance_report.txt")
-    stats.save_report(report_path)
+    with open(report_path, 'w') as f:
+        f.write(report)
+        # 新增：写入验证集结果
+        if val_metrics:
+            f.write("\n\n===== 验证集评估结果 =====\n")
+            f.write(f"准确率 (Accuracy): {val_metrics['accuracy']:.4f}\n")
+            f.write(f"精确率 (Precision): {val_metrics['precision']:.4f}\n")
+            f.write(f"召回率 (Recall): {val_metrics['recall']:.4f}\n")
+            f.write(f"F1分数 (F1-score): {val_metrics['f1']:.4f}\n")
 
-    # 保存处理摘要
+    # 保存处理摘要（扩展验证集信息）
     summary_path = os.path.join(output_dir, "summary.txt")
     with open(summary_path, 'w') as f:
         f.write(f"视频处理摘要\n")
@@ -265,28 +321,56 @@ def main(video_path: str,
         f.write(f"检测模型: {detection_model}\n")
         f.write(f"特征模型: {feature_model}\n")
         f.write(f"异常阈值: {threshold}\n")
+        # 新增：写入验证集基本信息
+        if val_data is not None:
+            f.write(f"\n验证集信息:\n")
+            f.write(f"验证样本数: {len(val_data)}\n")
+            f.write(f"正常样本数: {np.sum(val_labels == 0)}\n")
+            f.write(f"异常样本数: {np.sum(val_labels == 1)}\n")
 
     logger.info(f"处理完成! 结果已保存至: {output_dir}")
     print(f"处理摘要已保存至: {summary_path}")
     print(f"详细报告已保存至: {report_path}")
 
 
+# 新增：在PerformanceStats类中添加评估指标计算方法（如果没有的话）
+class PerformanceStats:
+    @staticmethod
+    def calculate_metrics(y_true, y_pred):
+        """计算分类评估指标"""
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+        # 处理可能的二分类特殊情况（如只有一类样本）
+        average = 'binary' if len(np.unique(y_true)) == 2 else 'weighted'
+
+        return {
+            'accuracy': accuracy_score(y_true, y_pred),
+            'precision': precision_score(y_true, y_pred, average=average, zero_division=0),
+            'recall': recall_score(y_true, y_pred, average=average, zero_division=0),
+            'f1': f1_score(y_true, y_pred, average=average, zero_division=0)
+        }
+
+
 if __name__ == "__main__":
-    # 示例参数
+    # 示例参数（新增验证集路径）
     video_path = "path/to/your/video.mp4"  # 替换为实际视频路径
     train_data_path = "data/train_data.npy"  # 替换为实际训练数据路径
     train_labels_path = "data/train_labels.npy"  # 替换为实际训练标签路径
+    val_data_path = "data/val_data.npy"  # 替换为实际验证集数据路径
+    val_labels_path = "data/val_labels.npy"  # 替换为实际验证集标签路径
 
     main(
         video_path=video_path,
         output_dir="results",
         train_data_path=train_data_path,
         train_labels_path=train_labels_path,
+        val_data_path=val_data_path,  # 传入验证集路径
+        val_labels_path=val_labels_path,
         threshold=0.7,
         visualize=True,
         detection_model="yolov5s",
         feature_model="resnet18",
-        detect_classes=["person", "car", "truck"],  # 检测行人、汽车和卡车
+        detect_classes=["person", "car", "truck"],
         use_gpu=True,
         batch_size=1,
         save_interval=10
