@@ -5,6 +5,7 @@ from datetime import datetime
 from sklearn.metrics import confusion_matrix, classification_report
 import matplotlib.pyplot as plt
 import seaborn as sns
+import joblib  # 新增：用于加载标准化器
 from anomaly_detection.lssvm_trainer import LSSVMTrainer
 
 # 设置中文字体支持
@@ -17,14 +18,11 @@ class ModelDebugger:
                  output_dir: str = "debug_results",
                  random_seed: int = 42):
         """
-        模型调试工具初始化
-
-        Args:
-            output_dir: 调试结果输出目录
-            random_seed: 随机种子，保证结果可复现
+        模型调试工具初始化（新增标准化器加载逻辑）
         """
         self.output_dir = output_dir
         self.random_seed = random_seed
+        self.scaler = None  # 新增：特征标准化器
 
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
@@ -56,12 +54,10 @@ class ModelDebugger:
                      train_data_path: str,
                      train_labels_path: str,
                      val_data_path: str,
-                     val_labels_path: str) -> tuple:
+                     val_labels_path: str,
+                     scaler_path: str) -> tuple:  # 新增：标准化器路径参数
         """
-        加载并验证数据集
-
-        Returns:
-            (train_data, train_labels, val_data, val_labels)
+        加载并验证数据集（新增特征标准化步骤）
         """
         try:
             # 加载训练集
@@ -80,18 +76,32 @@ class ModelDebugger:
             if train_data.shape[1] != val_data.shape[1]:
                 raise ValueError(f"训练集与验证集特征维度不一致: {train_data.shape[1]} vs {val_data.shape[1]}")
 
+            # 新增：加载特征标准化器
+            if not os.path.exists(scaler_path):
+                raise FileNotFoundError(f"特征标准化器文件不存在: {scaler_path}")
+            self.scaler = joblib.load(scaler_path)
+            self.logger.info(f"特征标准化器加载成功: {scaler_path}")
+            print(f"特征标准化器加载成功: {scaler_path}")
+
+            # 新增：对特征进行标准化（使用训练集的标准化器）
+            # 注意：训练数据在FrameToNpyConverter中已标准化，这里无需重复标准化
+            # 仅对验证集标准化（确保与训练集逻辑一致）
+            val_data_scaled = self.scaler.transform(val_data)
+            self.logger.info("验证集特征标准化完成")
+
             # 分析类别分布
             self._analyze_class_distribution(train_labels, "训练集")
             self._analyze_class_distribution(val_labels, "验证集")
 
-            return train_data, train_labels, val_data, val_labels
+            # 返回：训练数据（已标准化）、验证数据（标准化后）
+            return train_data, train_labels, val_data_scaled, val_labels
 
         except Exception as e:
             self.logger.error(f"数据集加载失败: {str(e)}")
             raise
 
     def _analyze_class_distribution(self, labels: np.ndarray, dataset_name: str):
-        """分析并记录类别分布"""
+        """分析并记录类别分布（保持不变）"""
         unique, counts = np.unique(labels, return_counts=True)
         distribution = dict(zip(unique, counts))
 
@@ -115,15 +125,7 @@ class ModelDebugger:
                            val_data: np.ndarray,
                            val_labels: np.ndarray,
                            params: dict = None) -> dict:
-        """
-        训练模型并评估性能
-
-        Args:
-            params: LSSVM模型参数
-
-        Returns:
-            评估指标字典
-        """
+        """训练模型并评估性能（保持逻辑，使用标准化后的验证集）"""
         try:
             self.logger.info("开始模型训练...")
             print("\n开始模型训练...")
@@ -134,17 +136,20 @@ class ModelDebugger:
                     setattr(self.trainer, key, value)
                     self.logger.info(f"设置模型参数: {key} = {value}")
 
-            # 训练模型
-            self.trainer.train(train_data, train_labels)
+            # 训练模型（使用已标准化的训练数据）
+            self.trainer.train(
+                X=train_data,
+                y=train_labels,
+                X_val=val_data,  # 传入标准化后的验证集
+                y_val=val_labels
+            )
 
-            # 评估训练集
+            # 评估训练集（训练数据已标准化）
             train_preds = self.trainer.predict(train_data)
-            train_preds = [1 if p > 0 else 0 for p in train_preds]
             train_metrics = self._calculate_metrics(train_labels, train_preds, "训练集")
 
-            # 评估验证集
+            # 评估验证集（已标准化）
             val_preds = self.trainer.predict(val_data)
-            val_preds = [1 if p > 0 else 0 for p in val_preds]
             val_metrics = self._calculate_metrics(val_labels, val_preds, "验证集")
 
             # 生成混淆矩阵
@@ -170,7 +175,7 @@ class ModelDebugger:
             raise
 
     def _calculate_metrics(self, y_true: np.ndarray, y_pred: np.ndarray, dataset_name: str) -> dict:
-        """计算评估指标"""
+        """计算评估指标（保持不变）"""
         from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
         # 处理二分类情况
@@ -198,7 +203,7 @@ class ModelDebugger:
         return metrics
 
     def _plot_confusion_matrix(self, y_true: np.ndarray, y_pred: np.ndarray, title: str):
-        """绘制混淆矩阵并保存"""
+        """绘制混淆矩阵并保存（保持不变）"""
         cm = confusion_matrix(y_true, y_pred)
         plt.figure(figsize=(8, 6))
         sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
@@ -215,7 +220,7 @@ class ModelDebugger:
         self.logger.info(f"混淆矩阵已保存至 {plot_path}")
 
     def _generate_classification_report(self, y_true: np.ndarray, y_pred: np.ndarray):
-        """生成详细分类报告"""
+        """生成详细分类报告（保持不变）"""
         report = classification_report(
             y_true, y_pred,
             target_names=['正常', '异常'],
@@ -237,12 +242,7 @@ class ModelDebugger:
                          val_data: np.ndarray,
                          val_labels: np.ndarray,
                          param_grid: dict):
-        """
-        简单参数搜索功能，帮助找到较优参数
-
-        Args:
-            param_grid: 参数网格，例如 {'gamma': [0.1, 1, 10], 'C': [0.1, 1, 10]}
-        """
+        """参数搜索功能（保持逻辑，使用标准化后的验证集）"""
         from itertools import product
 
         # 生成参数组合
@@ -260,7 +260,7 @@ class ModelDebugger:
             param_dict = dict(zip(param_names, params))
             print(f"\n参数组合 {i + 1}/{len(param_combinations)}: {param_dict}")
 
-            # 训练并评估
+            # 训练并评估（使用标准化后的验证集）
             metrics = self.train_and_evaluate(
                 train_data, train_labels,
                 val_data, val_labels,
@@ -300,30 +300,32 @@ class ModelDebugger:
 
 if __name__ == "__main__":
     # 数据集路径
-    train_data_path = "data/train_data.npy"
-    train_labels_path = "data/train_labels.npy"
-    val_data_path = "data/val_data.npy"
-    val_labels_path = "data/val_labels.npy"
+    train_data_path = "D:\\try\\train_data.npy"
+    train_labels_path = "D:\\try\\train_labels.npy"
+    val_data_path = "D:\\try\\val_data.npy"
+    val_labels_path = "D:\\try\\val_labels.npy"
+    scaler_path = "D:\\try\\feature_scaler.pkl"  # 新增：特征标准化器路径
 
     # 初始化调试器
     debugger = ModelDebugger(output_dir="model_debug_results")
 
     try:
-        # 加载数据集
+        # 加载数据集（传入标准化器路径）
         train_data, train_labels, val_data, val_labels = debugger.load_dataset(
             train_data_path, train_labels_path,
-            val_data_path, val_labels_path
+            val_data_path, val_labels_path,
+            scaler_path  # 传入标准化器路径
         )
 
         # 选项1: 使用默认参数训练并评估
         print("\n===== 使用默认参数训练 =====")
         debugger.train_and_evaluate(train_data, train_labels, val_data, val_labels)
 
-        # 选项2: 进行参数搜索（根据LSSVM实际参数调整）
+        # 选项2: 进行参数搜索（调整参数范围）
         print("\n===== 开始参数搜索 =====")
         param_grid = {
-            'gamma': [0.01, 0.1, 1, 10, 100],  # 核函数参数
-            'C': [0.1, 1, 10, 100]  # 正则化参数
+            'gamma': [0.1, 1, 10],  # 适当缩小范围，聚焦有效区间
+            'C': [50, 100, 200, 500]  # 增大C值，强化错误惩罚
         }
         debugger.parameter_search(train_data, train_labels, val_data, val_labels, param_grid)
 
