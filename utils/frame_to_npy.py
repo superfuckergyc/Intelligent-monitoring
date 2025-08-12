@@ -24,6 +24,12 @@ class FrameToNpyConverter:
         self.normal_dir = os.path.join(root_dir, "normal")  # 正常帧文件夹
         self.abnormal_dir = os.path.join(root_dir, "abnormal")  # 异常帧文件夹
 
+        # 检查子目录是否存在
+        if not os.path.isdir(self.normal_dir):
+            raise FileNotFoundError(f"未找到正常帧目录: {self.normal_dir}")
+        if not os.path.isdir(self.abnormal_dir):
+            raise FileNotFoundError(f"未找到异常帧目录: {self.abnormal_dir}")
+
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
 
@@ -45,43 +51,44 @@ class FrameToNpyConverter:
 
         # 处理单通道图像（转为3通道）
         if img_array.shape[-1] == 1:
-            img_array = np.repeat(img_array, 3, axis=-1)  # 复制单通道到RGB三通道
+            img_array = np.repeat(img_array, 3, axis=-1)
         # 处理4通道图像（去除alpha通道）
         elif img_array.shape[-1] == 4:
-            img_array = img_array[..., :3]  # 保留RGB通道
+            img_array = img_array[..., :3]
 
-        return img_array
+        return img_array.astype(np.float32)
 
     def extract_features_batch(self, img_paths):
         """批量提取图像特征（提升效率）"""
         batch_imgs = []
-        valid_paths = []  # 记录有效图像路径（用于错误跟踪）
+        valid_paths = []  # 记录有效图像路径
 
-        # 加载并预处理批量图像
         for img_path in img_paths:
             try:
                 img_array = self.load_and_preprocess_image(img_path)
                 batch_imgs.append(img_array)
                 valid_paths.append(img_path)
             except Exception as e:
-                print(f"预处理 {os.path.basename(img_path)} 失败: {str(e)}")
+                print(f"[警告] 预处理失败 {os.path.basename(img_path)}: {str(e)}")
 
-        if not batch_imgs:  # 空批量处理
+        if not batch_imgs:  # 空批量
             return np.array([]), []
 
-        # 批量预处理并提取特征
-        batch_imgs = np.array(batch_imgs)
-        batch_imgs = preprocess_input(batch_imgs)  # ResNet的标准化处理
-        features = self.feature_extractor.predict(batch_imgs, verbose=0)  # 关闭预测日志
-        return features.reshape(len(batch_imgs), -1), valid_paths  # 展平为1D特征向量
+        batch_imgs = np.array(batch_imgs, dtype=np.float32)
+        batch_imgs = preprocess_input(batch_imgs)  # ResNet标准化
+        features = self.feature_extractor.predict(batch_imgs, verbose=0)
+
+        # 显存优化：清空中间变量
+        del batch_imgs
+
+        return features.reshape(len(features), -1), valid_paths
 
     def process_all_frames(self):
         """处理所有帧并生成标准化的npy文件"""
-        # 收集所有图像路径及对应标签
         all_img_paths = []
         all_labels = []
 
-        # 收集正常帧路径（标签0）
+        # 正常帧
         normal_img_paths = [
             os.path.join(self.normal_dir, f)
             for f in os.listdir(self.normal_dir)
@@ -90,7 +97,7 @@ class FrameToNpyConverter:
         all_img_paths.extend(normal_img_paths)
         all_labels.extend([0] * len(normal_img_paths))
 
-        # 收集异常帧路径（标签1）
+        # 异常帧
         abnormal_img_paths = [
             os.path.join(self.abnormal_dir, f)
             for f in os.listdir(self.abnormal_dir)
@@ -105,7 +112,7 @@ class FrameToNpyConverter:
 
         # 批量提取特征
         all_features = []
-        valid_labels = []  # 与成功提取特征的图像对应
+        valid_labels = []
         total_batches = (len(all_img_paths) + self.batch_size - 1) // self.batch_size
 
         print("\n开始批量提取特征...")
@@ -115,47 +122,44 @@ class FrameToNpyConverter:
             batch_paths = all_img_paths[start_idx:end_idx]
             batch_labels = all_labels[start_idx:end_idx]
 
-            # 提取批量特征
             batch_features, valid_paths = self.extract_features_batch(batch_paths)
             if len(batch_features) > 0:
                 all_features.extend(batch_features)
-                valid_labels.extend([batch_labels[j] for j in range(len(batch_paths)) if batch_paths[j] in valid_paths])
+                valid_labels.extend([
+                    batch_labels[j] for j in range(len(batch_paths))
+                    if batch_paths[j] in valid_paths
+                ])
 
-            # 显示进度
             if (i + 1) % 5 == 0 or i + 1 == total_batches:
-                print(f"已完成 {i + 1}/{total_batches} 批处理，累计有效特征: {len(all_features)}")
+                print(f"已完成 {i + 1}/{total_batches} 批，累计有效特征: {len(all_features)}")
 
-        # 转换为numpy数组
-        X = np.array(all_features)
+        X = np.array(all_features, dtype=np.float32)
         y = np.array(valid_labels)
 
-        # 检查特征维度一致性
         if len(X) == 0:
             raise RuntimeError("未成功提取任何特征，请检查图像文件是否有效")
         if len(np.unique([len(feat) for feat in X])) != 1:
-            raise RuntimeError(f"特征维度不一致，发现多种维度: {np.unique([len(feat) for feat in X])}")
+            raise RuntimeError(f"特征维度不一致，发现: {np.unique([len(feat) for feat in X])}")
 
-        print(f"\n特征提取完成 - 总样本数: {X.shape[0]}, 特征维度: {X.shape[1]}")
+        print(f"\n特征提取完成 - 样本数: {X.shape[0]}, 特征维度: {X.shape[1]}")
         print(f"正常帧: {np.sum(y == 0)}, 异常帧: {np.sum(y == 1)}")
 
-        # 特征标准化（关键改进：LSSVM对特征尺度敏感）
+        # 特征标准化
         scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)  # 使用训练集的均值和标准差
+        X_scaled = scaler.fit_transform(X)
 
-        # 保存特征标准化器（供后续预测使用）
         scaler_path = os.path.join(self.output_dir, "feature_scaler.pkl")
         joblib.dump(scaler, scaler_path)
         print(f"特征标准化器已保存至: {scaler_path}")
 
-        # 划分训练集和验证集（保持标签分布）
+        # 划分训练集与验证集
         X_train, X_val, y_train, y_val = train_test_split(
             X_scaled, y,
             test_size=self.test_size,
             random_state=42,
-            stratify=y  # 确保训练集和验证集中正常/异常比例一致
+            stratify=y
         )
 
-        # 保存为npy文件
         np.save(os.path.join(self.output_dir, "train_data.npy"), X_train)
         np.save(os.path.join(self.output_dir, "train_labels.npy"), y_train)
         np.save(os.path.join(self.output_dir, "val_data.npy"), X_val)
@@ -166,16 +170,13 @@ class FrameToNpyConverter:
 
 
 if __name__ == "__main__":
-    # 配置路径（请根据实际情况修改）
-    # 注意：该目录下应包含两个子文件夹：normal（正常帧）和abnormal（异常帧）
     annotated_frames_dir = r"D:\try\data"
-    output_directory = r"D:\try"
+    output_directory = r"D:\try\npy_dataset"
 
-    # 创建转换器实例并处理
     converter = FrameToNpyConverter(
         root_dir=annotated_frames_dir,
         output_dir=output_directory,
-        test_size=0.2,  # 20%数据作为验证集
-        batch_size=32  # 批量处理大小，可根据内存调整
+        test_size=0.2,
+        batch_size=32
     )
     converter.process_all_frames()
