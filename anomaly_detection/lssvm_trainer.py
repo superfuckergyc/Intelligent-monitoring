@@ -222,7 +222,7 @@ class LSSVMClassifier(BaseEstimator, ClassifierMixin):
             solution, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
 
         self.bias = solution[0]
-        self.alphas = solution[1:] * y
+        self.alphas = solution[1:] 
         return self
 
     def _compute_kernel_matrix(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
