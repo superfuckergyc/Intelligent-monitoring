@@ -72,6 +72,13 @@ class LSSVMTrainer:
             )
             self.logger.warning("未提供外部验证集，使用内部划分的验证集")
 
+        # 新增：打印训练集和验证集的特征统计值，验证尺度是否一致
+        print(f"训练集特征 - 均值: {X_train.mean():.4f}, 标准差: {X_train.std():.4f}, "
+                         f"最小值: {X_train.min():.4f}, 最大值: {X_train.max():.4f}")
+        if X_val_scaled is not None:
+            print(f"验证集特征 - 均值: {X_val_scaled.mean():.4f}, 标准差: {X_val_scaled.std():.4f}, "
+                             f"最小值: {X_val_scaled.min():.4f}, 最大值: {X_val_scaled.max():.4f}")
+
         # 模型训练
         self.model = LSSVMClassifier(
             kernel=self.kernel_type,
@@ -193,10 +200,10 @@ class LSSVMClassifier(BaseEstimator, ClassifierMixin):
         self.support_vectors = X
         self.support_labels = y
 
-        # 类别权重
+        # 1. 计算类别权重（解决不平衡问题）
         if self.class_weight == 'balanced':
-            n_neg = np.sum(y == -1)
-            n_pos = np.sum(y == 1)
+            n_neg = np.sum(y == -1)  # 正常样本数
+            n_pos = np.sum(y == 1)  # 异常样本数
             weight_neg = n_samples / (2 * n_neg) if n_neg > 0 else 1.0
             weight_pos = n_samples / (2 * n_pos) if n_pos > 0 else 1.0
             weights = np.where(y == -1, weight_neg, weight_pos)
@@ -204,17 +211,19 @@ class LSSVMClassifier(BaseEstimator, ClassifierMixin):
         else:
             weights = np.ones(n_samples)
 
-        # 核矩阵
+        # 2. 计算核矩阵并应用权重（核心修复1：恢复权重应用）
         K = self._compute_kernel_matrix(X, X)
+        K_weighted = K * np.outer(weights, weights)  # 权重矩阵外积应用到核矩阵
 
-        # 方程组（加入小ridge提高数值稳定性）
-        ridge = 1e-8
+        # 3. 构建LSSVM方程组（核心修复2：目标向量恢复为全1）
+        ridge = 1e-8  # 保持数值稳定性
         A = np.block([
             [np.zeros((1, 1)), y.reshape(1, -1)],
-            [y.reshape(-1, 1), K + np.eye(n_samples) / self.C + ridge * np.eye(n_samples)]
+            [y.reshape(-1, 1), K_weighted + np.eye(n_samples) / self.C + ridge * np.eye(n_samples)]
         ])
-        b = np.hstack([0, weights])
+        b = np.hstack([0, np.ones(n_samples)])  # 目标向量为全1（符合LSSVM数学定义）
 
+        # 4. 求解方程组
         try:
             solution = np.linalg.solve(A, b)
         except np.linalg.LinAlgError:
@@ -222,7 +231,9 @@ class LSSVMClassifier(BaseEstimator, ClassifierMixin):
             solution, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
 
         self.bias = solution[0]
-        self.alphas = solution[1:] 
+        self.alphas = solution[1:]   # 乘标签（保持正确）
+        # 在fit方法末尾添加
+        print(f"模型偏置项bias: {self.bias:.4f}")
         return self
 
     def _compute_kernel_matrix(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
@@ -234,11 +245,21 @@ class LSSVMClassifier(BaseEstimator, ClassifierMixin):
             raise ValueError(f"不支持的核函数类型: {self.kernel}")
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """预测-1/1标签"""
         if self.alphas is None or self.bias is None:
             raise RuntimeError("模型未训练")
+
         K = self._compute_kernel_matrix(X, self.support_vectors)
-        y_pred = np.dot(K, self.alphas * self.support_labels) + self.bias
+        # 打印核矩阵的统计值（检查是否异常）
+        print(f"核矩阵形状: {K.shape}, 均值: {K.mean():.4f}, 最小值: {K.min():.4f}, 最大值: {K.max():.4f}")
+
+        # 打印alphas和支持向量标签的乘积
+        alpha_y = self.alphas * self.support_labels
+        print(f"alpha·y 均值: {alpha_y.mean():.4f}, 符号分布: 正={np.sum(alpha_y > 0)}, 负={np.sum(alpha_y < 0)}")
+
+        # 打印决策函数中间结果
+        y_pred = np.dot(K, alpha_y) + self.bias
+        print(f"决策函数输出: 均值={y_pred.mean():.4f}, 全部正值={np.all(y_pred >= 0)}, 最小值={y_pred.min():.4f}")
+
         return np.where(y_pred >= 0, 1, -1)
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
