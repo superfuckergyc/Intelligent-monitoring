@@ -144,29 +144,32 @@ class FrameToNpyConverter:
         print(f"\n特征提取完成 - 样本数: {X.shape[0]}, 特征维度: {X.shape[1]}")
         print(f"正常帧: {np.sum(y == 0)}, 异常帧: {np.sum(y == 1)}")
 
-        # 特征标准化
-        scaler = StandardScaler()
-        X_scaled = scaler.fit_transform(X)
-
-        scaler_path = os.path.join(self.output_dir, "feature_scaler.pkl")
-        joblib.dump(scaler, scaler_path)
-        print(f"特征标准化器已保存至: {scaler_path}")
-
-        # 划分训练集与验证集
-        X_train, X_val, y_train, y_val = train_test_split(
-            X_scaled, y,
+        # 【核心修改1】先划分训练集和验证集（原始特征，未标准化）
+        X_train_raw, X_val_raw, y_train, y_val = train_test_split(
+            X, y,
             test_size=self.test_size,
             random_state=42,
             stratify=y
         )
 
-        np.save(os.path.join(self.output_dir, "train_data.npy"), X_train)
+        # 【核心修改2】仅用训练集拟合标准化器，避免数据泄露
+        scaler = StandardScaler()
+        X_train_scaled = scaler.fit_transform(X_train_raw)  # 训练集：拟合+转换
+        X_val_scaled = scaler.transform(X_val_raw)          # 验证集：仅转换（复用训练集统计量）
+
+        # 保存标准化器（基于训练集的统计量）
+        scaler_path = os.path.join(self.output_dir, "feature_scaler.pkl")
+        joblib.dump(scaler, scaler_path)
+        print(f"特征标准化器已保存至: {scaler_path}")
+
+        # 保存标准化后的数据集
+        np.save(os.path.join(self.output_dir, "train_data.npy"), X_train_scaled)
         np.save(os.path.join(self.output_dir, "train_labels.npy"), y_train)
-        np.save(os.path.join(self.output_dir, "val_data.npy"), X_val)
+        np.save(os.path.join(self.output_dir, "val_data.npy"), X_val_scaled)
         np.save(os.path.join(self.output_dir, "val_labels.npy"), y_val)
 
         print(f"\n数据集已保存至 {self.output_dir}")
-        print(f"训练集: {X_train.shape[0]} 样本, 验证集: {X_val.shape[0]} 样本")
+        print(f"训练集: {X_train_scaled.shape[0]} 样本, 验证集: {X_val_scaled.shape[0]} 样本")
 
 
 if __name__ == "__main__":
@@ -176,7 +179,7 @@ if __name__ == "__main__":
     converter = FrameToNpyConverter(
         root_dir=annotated_frames_dir,
         output_dir=output_directory,
-        test_size=0.2,
+        test_size=0.25,
         batch_size=32
     )
     converter.process_all_frames()
