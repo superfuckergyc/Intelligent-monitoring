@@ -55,19 +55,16 @@ class ModelDebugger:
                      train_labels_path: str,
                      val_data_path: str,
                      val_labels_path: str,
-                     scaler_path: str) -> tuple:  # 新增：标准化器路径参数
-        """
-        加载并验证数据集（新增特征标准化步骤）
-        """
+                     scaler_path: str) -> tuple:
         try:
-            # 加载训练集
+            # 加载训练集（已标准化）
             train_data = np.load(train_data_path)
             train_labels = np.load(train_labels_path)
             self.logger.info(f"训练数据加载成功: 样本数={len(train_data)}, 特征维度={train_data.shape[1]}")
             print(f"训练数据: 样本数={len(train_data)}, 特征维度={train_data.shape[1]}")
 
-            # 加载验证集
-            val_data = np.load(val_data_path)
+            # 加载验证集（已标准化，无需再次处理）
+            val_data = np.load(val_data_path)  # val_data已经是标准化后的结果
             val_labels = np.load(val_labels_path)
             self.logger.info(f"验证数据加载成功: 样本数={len(val_data)}, 特征维度={val_data.shape[1]}")
             print(f"验证数据: 样本数={len(val_data)}, 特征维度={val_data.shape[1]}")
@@ -76,24 +73,21 @@ class ModelDebugger:
             if train_data.shape[1] != val_data.shape[1]:
                 raise ValueError(f"训练集与验证集特征维度不一致: {train_data.shape[1]} vs {val_data.shape[1]}")
 
-            # 新增：加载特征标准化器
+            # 加载标准化器（仅用于后续新数据预测，不用于验证集）
             if not os.path.exists(scaler_path):
                 raise FileNotFoundError(f"特征标准化器文件不存在: {scaler_path}")
             self.scaler = joblib.load(scaler_path)
             self.logger.info(f"特征标准化器加载成功: {scaler_path}")
             print(f"特征标准化器加载成功: {scaler_path}")
 
-            # 新增：对特征进行标准化（使用训练集的标准化器）
-            # 注意：训练数据在FrameToNpyConverter中已标准化，这里无需重复标准化
-            # 仅对验证集标准化（确保与训练集逻辑一致）
-            val_data_scaled = self.scaler.transform(val_data)
-            self.logger.info("验证集特征标准化完成")
+            # 【核心修改】删除验证集二次标准化步骤，直接使用val_data
+            val_data_scaled = val_data  # 验证集已标准化，直接赋值
 
             # 分析类别分布
             self._analyze_class_distribution(train_labels, "训练集")
             self._analyze_class_distribution(val_labels, "验证集")
 
-            # 返回：训练数据（已标准化）、验证数据（标准化后）
+            # 返回数据（训练集和验证集均已标准化）
             return train_data, train_labels, val_data_scaled, val_labels
 
         except Exception as e:
@@ -300,11 +294,11 @@ class ModelDebugger:
 
 if __name__ == "__main__":
     # 数据集路径
-    train_data_path = "D:\\try\\train_data.npy"
-    train_labels_path = "D:\\try\\train_labels.npy"
-    val_data_path = "D:\\try\\val_data.npy"
-    val_labels_path = "D:\\try\\val_labels.npy"
-    scaler_path = "D:\\try\\feature_scaler.pkl"  # 新增：特征标准化器路径
+    train_data_path = "D:\\try\\npy_dataset\\train_data.npy"
+    train_labels_path = "D:\\try\\npy_dataset\\train_labels.npy"
+    val_data_path = "D:\\try\\npy_dataset\\val_data.npy"
+    val_labels_path = "D:\\try\\npy_dataset\\val_labels.npy"
+    scaler_path = "D:\\try\\npy_dataset\\feature_scaler.pkl"  # 新增：特征标准化器路径
 
     # 初始化调试器
     debugger = ModelDebugger(output_dir="model_debug_results")
@@ -324,8 +318,8 @@ if __name__ == "__main__":
         # 选项2: 进行参数搜索（调整参数范围）
         print("\n===== 开始参数搜索 =====")
         param_grid = {
-            'gamma': [0.1, 1, 10],  # 适当缩小范围，聚焦有效区间
-            'C': [50, 100, 200, 500]  # 增大C值，强化错误惩罚
+            'gamma': [0.001,0.01,0.1, 1],  # 适当缩小范围，聚焦有效区间
+            'C': [200, 500,1000]  # 增大C值，强化错误惩罚
         }
         debugger.parameter_search(train_data, train_labels, val_data, val_labels, param_grid)
 
