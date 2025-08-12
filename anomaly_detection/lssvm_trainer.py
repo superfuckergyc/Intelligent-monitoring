@@ -17,20 +17,13 @@ class LSSVMTrainer:
     def __init__(self,
                  kernel_type: str = 'rbf',  # 核函数类型
                  gamma: float = 1.0,  # RBF核参数
-                 C: float = 10.0,  # 正则化参数
-                 test_size: float = 0.3,  # 测试集比例
+                 C: float = 100.0,  # 正则化参数（默认值调大，减少偏向性）
+                 test_size: float = 0.3,  # 内部验证集比例
                  random_state: int = 42,  # 随机种子
-                 optimize_gamma: bool = True):  # 是否优化gamma参数
+                 optimize_gamma: bool = True,  # 是否优化gamma参数
+                 class_weight: Optional[str] = 'balanced'):  # 类别权重处理
         """
-        初始化LSSVM训练器
-
-        Args:
-            kernel_type: 核函数类型，支持 'linear', 'rbf', 'poly'
-            gamma: RBF核参数，控制核函数的宽度
-            C: 正则化参数，控制模型复杂度
-            test_size: 测试集占比
-            random_state: 随机种子，保证结果可复现
-            optimize_gamma: 是否使用中位数法优化gamma参数
+        初始化LSSVM训练器（新增类别权重参数）
         """
         self.kernel_type = kernel_type
         self.gamma = gamma
@@ -38,6 +31,7 @@ class LSSVMTrainer:
         self.test_size = test_size
         self.random_state = random_state
         self.optimize_gamma = optimize_gamma
+        self.class_weight = class_weight  # 新增：类别权重参数
 
         # 初始化模型和标准化器
         self.model = None
@@ -46,166 +40,151 @@ class LSSVMTrainer:
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"LSSVM训练器初始化完成 - "
                          f"kernel={kernel_type}, gamma={gamma}, C={C}, "
-                         f"test_size={test_size}, optimize_gamma={optimize_gamma}")
+                         f"class_weight={class_weight}, test_size={test_size}")
 
-    def train(self, X: np.ndarray, y: np.ndarray) -> None:
-        """
-        训练LSSVM模型（对应文献公式11-13）
+    def train(self, X: np.ndarray, y: np.ndarray,
+              X_val: Optional[np.ndarray] = None,
+              y_val: Optional[np.ndarray] = None) -> None:
+        """训练LSSVM模型（支持外部验证集）"""
+        # 1. 标签转换：将0/1转换为LSSVM标准的-1/1
+        y = np.where(y == 0, -1, 1)  # 0→-1（正常），1保持1（异常）
+        if y_val is not None:
+            y_val = np.where(y_val == 0, -1, 1)
 
-        Args:
-            X: 特征矩阵，形状为(n_samples, n_features)
-            y: 标签向量，形状为(n_samples,)
-        """
-        # 标准化特征
+        # 2. 标准化特征
         X_scaled = self.scaler.fit_transform(X)
+        if X_val is not None:
+            X_val_scaled = self.scaler.transform(X_val)
 
-        # 如果使用RBF核且需要优化gamma
+        # 3. 优化RBF核gamma参数
         if self.kernel_type == 'rbf' and self.optimize_gamma:
             rbf_kernel = RBFKernel(gamma=self.gamma)
-            optimized_gamma = rbf_kernel.optimize_gamma(X_scaled)
-            self.gamma = optimized_gamma
-            self.logger.info(f"优化后的gamma值: {optimized_gamma}")
+            self.gamma = rbf_kernel.optimize_gamma(X_scaled)
+            self.logger.info(f"优化后的gamma值: {self.gamma}")
 
-        # 划分训练集和测试集
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y, test_size=self.test_size,
-            random_state=self.random_state, stratify=y
-        )
+        # 4. 划分内部验证集（仅当无外部验证集时）
+        if X_val is None or y_val is None:
+            X_train, X_val_scaled, y_train, y_val = train_test_split(
+                X_scaled, y, test_size=self.test_size,
+                random_state=self.random_state, stratify=y
+            )
+            self.logger.warning("未提供外部验证集，使用内部划分的验证集")
+        else:
+            X_train, y_train = X_scaled, y  # 全部训练数据用于训练
 
-        # 训练LSSVM模型
+        # 5. 训练LSSVM模型（传入类别权重参数）
         self.model = LSSVMClassifier(
             kernel=self.kernel_type,
             gamma=self.gamma,
-            C=self.C
+            C=self.C,
+            class_weight=self.class_weight
         )
         self.model.fit(X_train, y_train)
 
-        # 在测试集上评估模型
-        y_pred = self.model.predict(X_test)
-        self._evaluate_model(y_test, y_pred)
+        # 6. 在验证集上评估模型
+        y_pred = self.model.predict(X_val_scaled)
+        self._evaluate_model(y_val, y_pred)
 
-        self.logger.info(f"LSSVM模型训练完成，测试集准确率: {self.model.score(X_test, y_test):.4f}")
+        self.logger.info(f"LSSVM模型训练完成，验证集准确率: {self.model.score(X_val_scaled, y_val):.4f}")
 
     def grid_search(self, X: np.ndarray, y: np.ndarray,
-                    param_grid: Dict) -> None:
-        """
-        网格搜索优化LSSVM参数
+                    param_grid: Dict,
+                    X_val: Optional[np.ndarray] = None,
+                    y_val: Optional[np.ndarray] = None) -> None:
+        """网格搜索优化LSSVM参数（修复数据合并问题）"""
+        # 标签转换：0→-1，1→1
+        y = np.where(y == 0, -1, 1)
+        if y_val is not None:
+            y_val = np.where(y_val == 0, -1, 1)
 
-        Args:
-            X: 特征矩阵
-            y: 标签向量
-            param_grid: 参数网格，例如:
-                {'C': [0.1, 1, 10], 'gamma': [0.1, 1, 10]}
-        """
         # 标准化特征
         X_scaled = self.scaler.fit_transform(X)
+        X_val_scaled = self.scaler.transform(X_val) if X_val is not None else None
 
-        # 如果使用RBF核且需要优化gamma
+        # 优化gamma（如启用）
         if self.kernel_type == 'rbf' and self.optimize_gamma:
             rbf_kernel = RBFKernel(gamma=self.gamma)
-            optimized_gamma = rbf_kernel.optimize_gamma(X_scaled)
-            self.gamma = optimized_gamma
-            self.logger.info(f"优化后的gamma值: {optimized_gamma}")
+            self.gamma = rbf_kernel.optimize_gamma(X_scaled)
+            self.logger.info(f"优化后的gamma值: {self.gamma}")
+            # 移除网格中的gamma参数（已优化）
+            param_grid = {k: v for k, v in param_grid.items() if k != 'gamma'}
 
-            # 如果网格参数中包含gamma，则移除（已通过中位数法优化）
-            if 'gamma' in param_grid:
-                self.logger.info("使用中位数法优化gamma，忽略网格搜索中的gamma参数")
-                param_grid = {k: v for k, v in param_grid.items() if k != 'gamma'}
-
-        # 定义网格搜索
+        # 关键修复：仅用训练集做网格搜索（不合并验证集）
         grid_search = GridSearchCV(
-            estimator=LSSVMClassifier(kernel=self.kernel_type, gamma=self.gamma),
+            estimator=LSSVMClassifier(
+                kernel=self.kernel_type,
+                gamma=self.gamma,
+                class_weight=self.class_weight
+            ),
             param_grid=param_grid,
             cv=5,
-            scoring='accuracy',
+            scoring='f1_macro',  # 改用F1宏平均作为评分（更关注少数类）
             n_jobs=-1,
-            verbose=2
+            verbose=1
         )
 
-        # 执行网格搜索
+        # 执行网格搜索（仅用训练集）
         grid_search.fit(X_scaled, y)
 
-        # 输出最佳参数
-        self.logger.info(f"最佳参数: {grid_search.best_params_}")
-        self.logger.info(f"最佳得分: {grid_search.best_score_:.4f}")
-
-        # 使用最佳参数更新模型
+        # 更新最佳参数并重新训练
         self.C = grid_search.best_params_['C']
+        self.logger.info(f"最佳参数: {grid_search.best_params_}, 最佳交叉验证F1: {grid_search.best_score_:.4f}")
 
-        # 用最佳参数重新训练模型
-        self.train(X, y)
+        # 用最佳参数重新训练（使用全部训练数据和原始验证集）
+        self.train(X, np.where(y == -1, 0, 1), X_val, np.where(y_val == -1, 0, 1) if y_val is not None else None)
 
     def _evaluate_model(self, y_true: np.ndarray, y_pred: np.ndarray) -> None:
-        """
-        评估模型性能
+        """评估模型性能（支持-1/1标签）"""
+        # 转换回0/1标签用于报告（更直观）
+        y_true_01 = np.where(y_true == -1, 0, 1)
+        y_pred_01 = np.where(y_pred == -1, 0, 1)
 
-        Args:
-            y_true: 真实标签
-            y_pred: 预测标签
-        """
         # 打印分类报告
-        report = classification_report(y_true, y_pred)
+        report = classification_report(y_true_01, y_pred_01)
         self.logger.info(f"分类报告:\n{report}")
 
         # 打印混淆矩阵
-        cm = confusion_matrix(y_true, y_pred)
+        cm = confusion_matrix(y_true_01, y_pred_01)
         self.logger.info(f"混淆矩阵:\n{cm}")
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        使用训练好的模型进行预测
-
-        Args:
-            X: 输入特征矩阵
-
-        Returns:
-            预测标签
-        """
+        """预测标签（返回0/1）"""
         if self.model is None:
             raise RuntimeError("模型未训练，请先调用train()方法")
 
         # 标准化特征
         X_scaled = self.scaler.transform(X)
 
-        # 预测
-        return self.model.predict(X_scaled)
+        # 预测（模型返回-1/1，转换为0/1）
+        y_pred = self.model.predict(X_scaled)
+        return np.where(y_pred == -1, 0, 1)
 
     def save_model(self, path: str) -> None:
-        """
-        保存模型和标准化器到文件
-
-        Args:
-            path: 保存路径
-        """
+        """保存模型（包含所有必要参数）"""
         model_data = {
             'model': self.model,
             'scaler': self.scaler,
             'kernel_type': self.kernel_type,
             'gamma': self.gamma,
             'C': self.C,
-            'optimize_gamma': self.optimize_gamma
+            'optimize_gamma': self.optimize_gamma,
+            'class_weight': self.class_weight  # 新增：保存类别权重参数
         }
         joblib.dump(model_data, path)
         self.logger.info(f"模型已保存至: {path}")
 
     @staticmethod
     def load_model(path: str) -> 'LSSVMTrainer':
-        """
-        从文件加载模型
-
-        Args:
-            path: 文件路径
-
-        Returns:
-            加载的LSSVMTrainer实例
-        """
+        """加载模型（兼容新旧版本）"""
         model_data = joblib.load(path)
 
+        # 处理可能的旧版本数据
         trainer = LSSVMTrainer(
-            kernel_type=model_data['kernel_type'],
-            gamma=model_data['gamma'],
-            C=model_data['C'],
-            optimize_gamma=model_data.get('optimize_gamma', True)
+            kernel_type=model_data.get('kernel_type', 'rbf'),
+            gamma=model_data.get('gamma', 1.0),
+            C=model_data.get('C', 100.0),  # 匹配新默认值
+            optimize_gamma=model_data.get('optimize_gamma', True),
+            class_weight=model_data.get('class_weight', 'balanced')  # 新增：加载类别权重
         )
         trainer.model = model_data['model']
         trainer.scaler = model_data['scaler']
@@ -215,127 +194,99 @@ class LSSVMTrainer:
 
 class LSSVMClassifier(BaseEstimator, ClassifierMixin):
     """
-    自定义LSSVM分类器实现（基于scikit-learn接口）
+    自定义LSSVM分类器实现（优化版，支持类别权重）
     """
 
-    def __init__(self, kernel: str = 'rbf', gamma: float = 1.0, C: float = 10.0):
-        """
-        初始化LSSVM分类器
-
-        Args:
-            kernel: 核函数类型
-            gamma: RBF核参数
-            C: 正则化参数
-        """
+    def __init__(self,
+                 kernel: str = 'rbf',
+                 gamma: float = 1.0,
+                 C: float = 100.0,
+                 class_weight: Optional[str] = 'balanced'):  # 新增类别权重参数
         self.kernel = kernel
         self.gamma = gamma
         self.C = C
-        self.alphas = None
-        self.bias = None
-        self.support_vectors = None
-        self.support_labels = None
+        self.class_weight = class_weight  # 类别权重（'balanced'或None）
+        self.alphas = None  # 拉格朗日乘子
+        self.bias = None  # 偏置项
+        self.support_vectors = None  # 支持向量（训练样本）
+        self.support_labels = None  # 支持向量标签（-1/1）
+        self.logger = logging.getLogger(__name__)  # 新增日志实例
 
-        # 初始化RBF核
+        # 初始化核函数
         if kernel == 'rbf':
             self.rbf_kernel = RBFKernel(gamma=gamma)
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> 'LSSVMClassifier':
         """
-        训练LSSVM模型（对应文献公式11-13）
-
-        Args:
-            X: 训练特征矩阵
-            y: 训练标签向量
-
-        Returns:
-            训练好的模型
+        训练LSSVM模型（支持类别权重，标签需为-1/1）
         """
-        n_samples, n_features = X.shape
-
-        # 保存支持向量和标签
+        n_samples = X.shape[0]
         self.support_vectors = X
-        self.support_labels = y
+        self.support_labels = y  # 已转换为-1/1（正常/异常）
 
-        # 构建核矩阵
-        K = self._compute_kernel_matrix(X)
+        # 1. 计算类别权重（解决不平衡问题）
+        if self.class_weight == 'balanced':
+            # 自动计算权重：与类别样本数成反比
+            n_neg = np.sum(y == -1)  # 正常样本数
+            n_pos = np.sum(y == 1)  # 异常样本数
 
-        # 构建并求解LSSVM方程组（文献公式12）
-        # [0  y^T] [b]   [0]
-        # [y  K+I/C] [α] = [1]
-        O = np.ones((n_samples, 1))
-        y_col = y.reshape(-1, 1)
+            # 防止除以零（如果某类样本数为0）
+            weight_neg = n_samples / (2 * n_neg) if n_neg > 0 else 1.0
+            weight_pos = n_samples / (2 * n_pos) if n_pos > 0 else 1.0
 
-        # 构建增广矩阵
-        A = np.zeros((n_samples + 1, n_samples + 1))
-        A[0, 1:] = y_col.T
-        A[1:, 0] = y_col.flatten()
-        A[1:, 1:] = K + np.eye(n_samples) / self.C
+            # 生成权重向量（每个样本对应自身类别的权重）
+            weights = np.where(y == -1, weight_neg, weight_pos)
+            self.logger.info(f"类别权重计算完成 - 正常样本权重: {weight_neg:.2f}, 异常样本权重: {weight_pos:.2f}")
+        else:
+            # 无权重（所有样本权重为1）
+            weights = np.ones(n_samples)
 
-        # 构建右侧向量
-        b = np.zeros(n_samples + 1)
-        b[1:] = np.ones(n_samples)
+        # 2. 计算核矩阵（带权重优化）
+        K = self._compute_kernel_matrix(X, X)
+        K_weighted = K * np.outer(weights, weights)  # 应用样本权重到核矩阵
 
-        # 求解方程组
-        solution = np.linalg.solve(A, b)
+        # 3. 构建LSSVM方程组（文献公式12，使用加权核矩阵）
+        A = np.block([
+            [0, y.reshape(1, -1)],
+            [y.reshape(-1, 1), K_weighted + np.eye(n_samples) / self.C]  # 加权核矩阵+正则项
+        ])
+        b = np.hstack([0, np.ones(n_samples)])  # 右侧向量
 
-        # 提取偏置和拉格朗日乘子
+        # 4. 求解方程组（增强稳定性）
+        try:
+            solution = np.linalg.solve(A, b)
+        except np.linalg.LinAlgError:
+            # 处理奇异矩阵：使用最小二乘近似
+            self.logger.warning("核矩阵可能奇异，使用最小二乘求解以增强稳定性")
+            solution, _, _, _ = np.linalg.lstsq(A, b, rcond=None)
+
+        # 5. 提取参数
         self.bias = solution[0]
-        self.alphas = solution[1:] * y
+        self.alphas = solution[1:] * y  # 乘标签（文献公式推导结果）
 
         return self
 
-    def _compute_kernel_matrix(self, X: np.ndarray) -> np.ndarray:
-        """计算核矩阵"""
+    def _compute_kernel_matrix(self, X1: np.ndarray, X2: np.ndarray) -> np.ndarray:
+        """计算核矩阵（矩阵运算优化）"""
         if self.kernel == 'linear':
-            return np.dot(X, X.T)
-
+            return np.dot(X1, X2.T)
         elif self.kernel == 'rbf':
-            # 使用3.2模块的RBF核实现
-            return self.rbf_kernel.compute(X, X)
-
+            return self.rbf_kernel.compute(X1, X2)  # 调用RBF核的矩阵实现
         else:
             raise ValueError(f"不支持的核函数类型: {self.kernel}")
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """
-        预测新样本的标签
-
-        Args:
-            X: 待预测样本特征矩阵
-
-        Returns:
-            预测标签向量
-        """
+        """预测标签（返回-1/1）"""
         if self.alphas is None or self.bias is None:
             raise RuntimeError("模型未训练，请先调用fit()方法")
 
-        # 计算预测值（文献公式13）
-        n_samples = X.shape[0]
-        y_pred = np.zeros(n_samples)
+        # 矩阵运算优化：批量计算核函数值
+        K = self._compute_kernel_matrix(X, self.support_vectors)  # (n_samples, n_support)
+        y_pred = np.dot(K, self.alphas * self.support_labels) + self.bias  # 向量运算
 
-        for i in range(n_samples):
-            kernel_vals = np.array([self._compute_kernel(X[i], self.support_vectors[j])
-                                    for j in range(len(self.support_vectors))])
-            y_pred[i] = np.sum(self.alphas * self.support_labels * kernel_vals) + self.bias
-
-        # 将预测值转换为类别标签（>0为1，<=0为-1）
-        return np.sign(y_pred).astype(int)
-
-    def _compute_kernel(self, x1: np.ndarray, x2: np.ndarray) -> float:
-        """计算两个样本之间的核函数值"""
-        if self.kernel == 'linear':
-            return np.dot(x1, x2)
-
-        elif self.kernel == 'rbf':
-            # 使用3.2模块的RBF核实现
-            return self.rbf_kernel.compute(x1.reshape(1, -1), x2.reshape(1, -1))[0, 0]
-
-        else:
-            raise ValueError(f"不支持的核函数类型: {self.kernel}")
+        return np.sign(y_pred).astype(int)  # 符号函数分类
 
     def score(self, X: np.ndarray, y: np.ndarray) -> float:
-        """计算模型准确率"""
+        """计算准确率（支持-1/1标签）"""
         y_pred = self.predict(X)
         return np.mean(y_pred == y)
-
-# 模块测试代码保持不变...
